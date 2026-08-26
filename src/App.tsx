@@ -33,8 +33,15 @@ import ServicePricesManager from "./components/ServicePricesManager";
 import TreatmentLifecyclePanel from "./components/TreatmentLifecyclePanel";
 import AnalyticsDashboard from "./components/AnalyticsDashboard";
 import AppointmentBookingManager from "./components/AppointmentBookingManager";
-import { QueueItem, ClinicStats, SalesRecord } from "./types";
-import { syncLocalToFirestore } from "./services/firestoreService";
+import { QueueItem, ClinicStats, SalesRecord, Patient } from "./types";
+import {
+  getFirestoreCollection,
+  subscribeToFirestoreCollection,
+  ensureFirestoreInitialSeed,
+  checkInPatientDirect,
+  saveToFirestore,
+  COLLECTIONS,
+} from "./services/firestoreService";
 
 export default function App() {
   // Navigation tabs
@@ -58,67 +65,73 @@ export default function App() {
   const [printedInvoiceNo, setPrintedInvoiceNo] = useState<string | null>(null);
   const [printedBillingDetails, setPrintedBillingDetails] = useState<any | null>(null);
 
-  // Firestore sync state
+  // Firestore connection status
   const [isSyncingFirestore, setIsSyncingFirestore] = useState(false);
-  const [lastFirestoreSync, setLastFirestoreSync] = useState<Date | null>(null);
+  const [lastFirestoreSync, setLastFirestoreSync] = useState<Date | null>(new Date());
 
-  // Sync with Firestore
-  const triggerFirestoreSync = async () => {
+  // Load stats & queue directly from Firestore
+  const loadClinicData = async () => {
     setIsSyncingFirestore(true);
     try {
-      const res = await syncLocalToFirestore();
-      if (res.success) {
-        setLastFirestoreSync(new Date());
-      }
-    } catch (err) {
-      console.warn("Firestore sync error:", err);
+      const [queueData, salesData, patientsData] = await Promise.all([
+        getFirestoreCollection<QueueItem>(COLLECTIONS.QUEUE),
+        getFirestoreCollection<SalesRecord>(COLLECTIONS.SALES),
+        getFirestoreCollection<Patient>(COLLECTIONS.PATIENTS),
+      ]);
+
+      setQueue(queueData);
+      setSalesLedger(salesData);
+
+      const completedVisits = queueData.filter((q) => q.status === "Completed").length;
+      const totalRev = salesData.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+
+      setStats({
+        totalPatients: patientsData.length,
+        todayVisits: completedVisits,
+        todaySales: totalRev,
+        avgTicket: completedVisits > 0 ? totalRev / completedVisits : 0,
+        waitingCount: queueData.filter((q) => q.status === "Waiting").length,
+        inTreatmentCount: queueData.filter((q) => q.status === "In Treatment").length,
+      });
+
+      setLastFirestoreSync(new Date());
+    } catch (error) {
+      console.error("Failed to load Firestore data:", error);
     } finally {
       setIsSyncingFirestore(false);
     }
   };
 
-  // Load stats & queue
-  const loadClinicData = async () => {
-    try {
-      // 1. Fetch queue items
-      const queueRes = await fetch("/api/queue");
-      if (queueRes.ok) {
-        const queueData = await queueRes.ok ? await queueRes.json() : [];
-        setQueue(queueData);
-      }
-
-      // 2. Fetch sales and overall metrics
-      const salesRes = await fetch("/api/sales");
-      if (salesRes.ok) {
-        const salesData = await salesRes.json();
-        setSalesLedger(salesData.ledger || []);
-
-        const metrics = salesData.metrics || {};
-        const completedVisits = metrics.completedVisits || 0;
-        const totalRev = metrics.totalRevenue || 0;
-
-        setStats({
-          totalPatients: metrics.totalPatients || 0,
-          todayVisits: completedVisits,
-          todaySales: totalRev,
-          avgTicket: completedVisits > 0 ? totalRev / completedVisits : 0,
-          waitingCount: queue.filter((q) => q.status === "Waiting").length,
-          inTreatmentCount: queue.filter((q) => q.status === "In Treatment").length,
-        });
-      }
-    } catch (error) {
-      console.error("Failed to load clinical statistics:", error);
-    }
-  };
-
   useEffect(() => {
-    loadClinicData();
-    // Initial Firestore synchronization on app load
-    triggerFirestoreSync();
+    // 1. Ensure initial seed on empty Firestore
+    ensureFirestoreInitialSeed().then(() => {
+      loadClinicData();
+    });
 
-    // Auto-poll clinic queue status every 15 seconds to ensure real-time synchronization
-    const pollInterval = setInterval(loadClinicData, 15000);
-    return () => clearInterval(pollInterval);
+    // 2. Setup Real-time Firestore Listeners
+    const unsubQueue = subscribeToFirestoreCollection<QueueItem>(COLLECTIONS.QUEUE, (updatedQueue) => {
+      setQueue(updatedQueue);
+      setStats((prev) => ({
+        ...prev,
+        waitingCount: updatedQueue.filter((q) => q.status === "Waiting").length,
+        inTreatmentCount: updatedQueue.filter((q) => q.status === "In Treatment").length,
+      }));
+    });
+
+    const unsubSales = subscribeToFirestoreCollection<SalesRecord>(COLLECTIONS.SALES, (updatedSales) => {
+      setSalesLedger(updatedSales);
+      const totalRev = updatedSales.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+      setStats((prev) => ({
+        ...prev,
+        todaySales: totalRev,
+        avgTicket: prev.todayVisits > 0 ? totalRev / prev.todayVisits : 0,
+      }));
+    });
+
+    return () => {
+      unsubQueue();
+      unsubSales();
+    };
   }, []);
 
   const getPaymentMethodKhmer = (method: string) => {
@@ -132,8 +145,7 @@ export default function App() {
     setCheckoutItem(null); // Close checkout modal
     setPrintedInvoiceNo(invoiceNo); // Open print preview modal
     setPrintedBillingDetails(billingDetails);
-    loadClinicData(); // Reload queue and KPIs
-    triggerFirestoreSync(); // Sync to Firestore cloud
+    loadClinicData(); // Reload queue and KPIs from Firestore
   };
 
   const handleCheckInFromAppointment = async (
@@ -143,27 +155,21 @@ export default function App() {
     appointmentId?: string
   ) => {
     try {
-      const res = await fetch("/api/queue/checkin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: patientName,
-          phone: phone,
-          doctor: doctor || "Dr. Ly MengKheang",
-        }),
+      await checkInPatientDirect({
+        name: patientName,
+        phone: phone,
+        doctor: doctor || "Dr. Ly MengKheang",
       });
-      if (res.ok) {
-        if (appointmentId) {
-          await fetch(`/api/appointments/${appointmentId}/status`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ status: "Completed" }),
-          }).catch(() => {});
-        }
-        await loadClinicData();
-        triggerFirestoreSync();
-        setActiveTab("dashboard");
+
+      if (appointmentId) {
+        await saveToFirestore(COLLECTIONS.APPOINTMENTS, {
+          id: appointmentId,
+          status: "Completed",
+        });
       }
+
+      await loadClinicData();
+      setActiveTab("dashboard");
     } catch (e) {
       console.error("Failed to check in appointment patient:", e);
     }
@@ -252,8 +258,8 @@ export default function App() {
                 : "text-slate-300 hover:bg-slate-800/60 hover:text-white"
             }`}
           >
-            <Layers className="w-4 h-4 flex-shrink-0 text-amber-400 active:text-white" />
-            <span>តារាងតម្លៃ</span>
+            <DollarSign className="w-4 h-4 flex-shrink-0 text-amber-400 active:text-white" />
+            <span>តារាងថ្លៃសេវា</span>
           </button>
 
           <button
@@ -267,7 +273,7 @@ export default function App() {
                 : "text-slate-300 hover:bg-slate-800/60 hover:text-white"
             }`}
           >
-            <Clock className="w-4 h-4 flex-shrink-0 text-emerald-400 active:text-white" />
+            <Layers className="w-4 h-4 flex-shrink-0 text-emerald-400 active:text-white" />
             <span>តាមដានការព្យាបាល</span>
           </button>
 
@@ -282,157 +288,152 @@ export default function App() {
                 : "text-slate-300 hover:bg-slate-800/60 hover:text-white"
             }`}
           >
-            <TrendingUp className="w-4 h-4 flex-shrink-0 text-rose-400 active:text-white" />
-            <span>របាយការណ៍ & ស្ថិតិ</span>
+            <TrendingUp className="w-4 h-4 flex-shrink-0 text-purple-400 active:text-white" />
+            <span>របាយការណ៍ហិរញ្ញវត្ថុ</span>
           </button>
         </nav>
 
-        {/* Sidebar Footer / Online indicator */}
-        <div className="p-4 border-t border-slate-800 bg-slate-950/40 text-center">
-          <div className="flex items-center gap-2 justify-center mb-1">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-            </span>
-            <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-wider">សកម្ម / Online</span>
+        {/* Sidebar Footer & Doctor Profile */}
+        <div className="p-4 border-t border-slate-800 bg-slate-950/40">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-full bg-blue-600/30 text-blue-400 flex items-center justify-center font-bold text-xs border border-blue-500/20">
+              MK
+            </div>
+            <div className="overflow-hidden">
+              <div className="text-xs font-bold text-slate-200 truncate">Dr. Ly MengKheang</div>
+              <div className="text-[10px] text-slate-400 truncate">Lead Dentist & Director</div>
+            </div>
           </div>
-          <p className="text-[9px] text-slate-500">ប្រព័ន្ធគ្រប់គ្រងគ្លីនិកធ្មេញ</p>
         </div>
       </aside>
 
-      {/* 2. RIGHT CONTENT AREA */}
-      <div className="flex-1 flex flex-col min-w-0 min-h-screen">
-        
-        {/* Mobile Header Bar (Only visible on mobile) */}
-        <header className="bg-gradient-to-r from-blue-600 to-indigo-700 text-white shadow-md sticky top-0 z-30 px-4 py-3.5 flex items-center justify-between md:hidden">
+      {/* 2. MAIN CONTENT AREA - Right Side */}
+      <div className="flex-1 flex flex-col min-w-0 overflow-x-hidden">
+        {/* Top App Bar with Clinic Status */}
+        <header className="bg-white border-b border-slate-100 sticky top-0 z-20 px-4 sm:px-6 py-3.5 flex justify-between items-center shadow-xs">
           <div className="flex items-center gap-3">
-            <button 
+            {/* Mobile menu trigger */}
+            <button
               onClick={() => setIsMobileMenuOpen(true)}
-              className="p-1.5 bg-white/10 hover:bg-white/20 rounded-lg text-white transition cursor-pointer"
+              className="md:hidden p-2 hover:bg-slate-100 rounded-xl text-slate-600 transition cursor-pointer"
             >
               <Menu className="w-5 h-5" />
             </button>
-            <h1 className="text-xs font-black tracking-tight">
-              {activeTab === "dashboard" && "ផ្នែកទទួលភ្ញៀវ"}
-              {activeTab === "booking" && "គ្រប់គ្រងការណាត់ជួប"}
-              {activeTab === "prices" && "តារាងតម្លៃសេវាកម្ម"}
-              {activeTab === "followup" && "តាមដានការព្យាបាល"}
-              {activeTab === "reports" && "របាយការណ៍ & ស្ថិតិ"}
+            <h1 className="text-sm font-bold text-slate-800">
+              {activeTab === "dashboard" && "ផ្នែកទទួលភ្ញៀវ & ជួរពិនិត្យ (Reception & Queue)"}
+              {activeTab === "booking" && "កាលវិភាគណាត់ជួប (Appointment Booking)"}
+              {activeTab === "prices" && "តារាងតម្លៃសេវាកម្ម (Service Price Catalog)"}
+              {activeTab === "followup" && "តាមដានការព្យាបាល (Treatment Lifecycle Tracking)"}
+              {activeTab === "reports" && "របាយការណ៍ហិរញ្ញវត្ថុ & ចំណូល (Financial Analytics)"}
             </h1>
           </div>
-          <button
-            onClick={triggerFirestoreSync}
-            disabled={isSyncingFirestore}
-            className="text-[10px] font-bold bg-white/15 hover:bg-white/25 px-2.5 py-1 rounded-full border border-white/25 flex items-center gap-1 cursor-pointer transition"
-          >
-            <Flame className={`w-3 h-3 text-amber-300 ${isSyncingFirestore ? "animate-spin" : ""}`} />
-            <span>{isSyncingFirestore ? "Syncing..." : "Firestore"}</span>
-          </button>
-        </header>
 
-        {/* Desktop Title & Date Bar */}
-        <header className="hidden md:flex bg-white border-b border-slate-150 h-16 px-8 items-center justify-between shadow-2xs">
-          <div>
-            <h1 className="text-sm font-extrabold text-slate-800">
-              {activeTab === "dashboard" && "ផ្នែកទទួលភ្ញៀវ & បញ្ជីរង់ចាំ"}
-              {activeTab === "booking" && "តារាងណាត់ជួប និង ប្រតិទិនការងារ"}
-              {activeTab === "prices" && "គ្រប់គ្រងតារាងតម្លៃសេវាកម្ម"}
-              {activeTab === "followup" && "តាមដានវដ្តជីវិតនៃការព្យាបាល និងការណាត់បន្ត"}
-              {activeTab === "reports" && "របាយការណ៍ហិរញ្ញវត្ថុ និងស្ថិតិវេជ្ជសាស្ត្រ"}
-            </h1>
-          </div>
-          <div className="flex items-center gap-3">
-            {/* Firestore Cloud Sync Badge & Button */}
+          <div className="flex items-center gap-2 sm:gap-3">
+            {/* Firestore Cloud Sync Badge */}
             <button
-              onClick={triggerFirestoreSync}
+              onClick={loadClinicData}
               disabled={isSyncingFirestore}
-              title="Cloud Firestore Real-time Sync (brace-studio-dental-clinic)"
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100/80 border border-amber-200/80 text-amber-900 rounded-xl text-xs font-semibold transition cursor-pointer"
+              title="Cloud Firestore Realtime Sync"
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition cursor-pointer"
             >
-              <Flame className={`w-3.5 h-3.5 text-amber-600 ${isSyncingFirestore ? "animate-spin" : ""}`} />
-              <span className="font-bold">Firestore:</span>
-              <span className="text-[11px] text-amber-800 font-mono">
-                {isSyncingFirestore ? "Syncing..." : lastFirestoreSync ? "Connected" : "Connect"}
-              </span>
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+              <Flame className={`w-3.5 h-3.5 text-amber-600 ${isSyncingFirestore ? "animate-bounce" : ""}`} />
+              <span>Firestore: Connected</span>
             </button>
 
-            <button
-              onClick={() => {
-                loadClinicData();
-                triggerFirestoreSync();
-              }}
-              title="ធ្វើបច្ចុប្បន្នភាពទិន្នន័យ"
-              className="p-2 hover:bg-slate-100 rounded-xl text-slate-500 hover:text-blue-600 transition cursor-pointer"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
-            <div className="text-xs text-slate-400 font-semibold border-l border-slate-200 pl-4">
-              {new Date().toLocaleDateString("kh-KH", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
+            <div className="bg-slate-50 border border-slate-200/80 px-3 py-1.5 rounded-full text-xs font-mono text-slate-500 font-semibold hidden sm:block">
+              {new Date().toLocaleDateString("en-GB", { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
             </div>
+            
+            <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" title="System Live" />
           </div>
         </header>
 
-        {/* Main Container Stage */}
-        <main className="flex-1 max-w-7xl w-full mx-auto px-4 md:px-8 py-6">
-        
-        {/* --- 1. RECEPTION DASHBOARD VIEW --- */}
-        {activeTab === "dashboard" && (
-          <div id="dashboard-stage" className="space-y-6">
-            
-            {/* KPI Cards section */}
-            <ClinicStatsCards stats={stats} />
+        {/* Dynamic Main Workspace Tab Panels */}
+        <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto space-y-6">
+          
+          {/* TAB 1: DASHBOARD & QUEUE */}
+          {activeTab === "dashboard" && (
+            <div className="space-y-6">
+              {/* Clinic Statistics KPI Cards */}
+              <ClinicStatsCards stats={stats} />
 
-            {/* Patients form + Active list splits */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-1">
-                <PatientSearchCheckIn onCheckInSuccess={loadClinicData} />
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                {/* Left Column: Quick Patient Search & Check-in (4 cols) */}
+                <div className="lg:col-span-4">
+                  <PatientSearchCheckIn onCheckInSuccess={loadClinicData} />
+                </div>
+
+                {/* Right Column: Real-time Patient Queue (8 cols) */}
+                <div className="lg:col-span-8">
+                  <ActiveQueueTable
+                    queue={queue}
+                    onRefresh={loadClinicData}
+                    onCheckout={(item) => setCheckoutItem(item)}
+                  />
+                </div>
               </div>
-              <div className="lg:col-span-2">
-                <ActiveQueueTable
-                  queue={queue}
-                  onRefresh={loadClinicData}
-                  onCheckout={(item) => setCheckoutItem(item)}
-                />
-              </div>
+
+              {/* Quick Recent Transactions Feed under queue */}
+              {salesLedger.length > 0 && (
+                <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-xs space-y-4">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+                        ប្រតិបត្តិការបង់ប្រាក់ចុងក្រោយ (Recent Sales)
+                      </h3>
+                      <p className="text-[11px] text-slate-400">ប្រវត្តិទូទាត់ប្រាក់ថ្ងៃនេះ</p>
+                    </div>
+                    <button
+                      onClick={() => setActiveTab("reports")}
+                      className="text-xs text-blue-600 font-bold hover:underline cursor-pointer"
+                    >
+                      មើលទាំងអស់ →
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                    {salesLedger.slice(0, 3).map((sale) => (
+                      <div key={sale.txnId} className="p-3.5 bg-slate-50/70 border border-slate-100 rounded-2xl flex items-center justify-between">
+                        <div>
+                          <div className="text-xs font-bold text-slate-700">{sale.patientName}</div>
+                          <div className="text-[10px] text-slate-400 font-mono">{sale.txnId} • {getPaymentMethodKhmer(sale.paymentMethod)}</div>
+                        </div>
+                        <div className="text-sm font-black font-mono text-emerald-600">
+                          +${Number(sale.amount).toFixed(2)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
+          )}
 
-          </div>
-        )}
-
-        {/* --- 2. APPOINTMENT BOOKING & CALENDAR VIEW --- */}
-        {activeTab === "booking" && (
-          <div id="booking-stage">
+          {/* TAB 2: APPOINTMENTS & BOOKING */}
+          {activeTab === "booking" && (
             <AppointmentBookingManager onCheckInToQueue={handleCheckInFromAppointment} />
-          </div>
-        )}
+          )}
 
-        {/* --- 4. SERVICES PRICES CATALOG VIEW --- */}
-        {activeTab === "prices" && (
-          <div id="prices-stage">
+          {/* TAB 3: SERVICE PRICE CATALOG */}
+          {activeTab === "prices" && (
             <ServicePricesManager onPricesUpdated={loadClinicData} />
-          </div>
-        )}
+          )}
 
-        {/* --- 5. TREATMENT LIFECYCLE & FOLLOW-UPS VIEW --- */}
-        {activeTab === "followup" && (
-          <div id="followup-stage">
+          {/* TAB 4: TREATMENT LIFECYCLE TRACKING */}
+          {activeTab === "followup" && (
             <TreatmentLifecyclePanel />
-          </div>
-        )}
+          )}
 
-        {/* --- 6. CLINICAL REPORT & ANALYTICS VIEW --- */}
-        {activeTab === "reports" && (
-          <div id="reports-stage">
+          {/* TAB 5: REPORTS & FINANCIAL ANALYTICS */}
+          {activeTab === "reports" && (
             <AnalyticsDashboard />
-          </div>
-        )}
+          )}
 
-      </main>
+        </main>
+      </div>
 
-      {/* --- FLOATING & PORTAL OVERLAY MODALS --- */}
-
-      {/* Checkout details checkout form portal */}
+      {/* 3. MODALS */}
+      {/* Checkout & Billing Modal */}
       {checkoutItem && (
         <BillingInvoiceModal
           item={checkoutItem}
@@ -441,7 +442,7 @@ export default function App() {
         />
       )}
 
-      {/* Invoice receipt print preview portal */}
+      {/* Printable Invoice Modal */}
       {printedInvoiceNo && printedBillingDetails && (
         <PrintInvoiceModal
           invoiceNo={printedInvoiceNo}
@@ -453,12 +454,6 @@ export default function App() {
         />
       )}
 
-      {/* Footer copyright */}
-      <footer className="bg-slate-100 border-t border-slate-200 py-4 text-center text-[10px] text-slate-400">
-        <p>© 2026 គ្លីនិកធ្មេញ លី ម៉េងឃាង។ រក្សាសិទ្ធិគ្រប់យ៉ាង។</p>
-      </footer>
-
-      </div>
     </div>
   );
 }

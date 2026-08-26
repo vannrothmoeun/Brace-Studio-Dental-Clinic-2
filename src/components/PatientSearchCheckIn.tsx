@@ -6,6 +6,12 @@
 import React, { useState, useEffect, useRef } from "react";
 import { User, Phone, UserCheck, Search, PlusCircle, Sparkles } from "lucide-react";
 import { Patient } from "../types";
+import {
+  getFirestoreCollection,
+  saveToFirestore,
+  checkInPatientDirect,
+  COLLECTIONS,
+} from "../services/firestoreService";
 
 interface PatientSearchCheckInProps {
   onCheckInSuccess: () => void;
@@ -17,10 +23,18 @@ export default function PatientSearchCheckIn({ onCheckInSuccess }: PatientSearch
   const [doctor, setDoctor] = useState("Dr. Ly MengKheang (គ្រូពេទ្យបង្គោល)");
   const [patientId, setPatientId] = useState("");
   const [suggestions, setSuggestions] = useState<Patient[]>([]);
+  const [allPatients, setAllPatients] = useState<Patient[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Load patients cache for rapid autocomplete
+  useEffect(() => {
+    getFirestoreCollection<Patient>(COLLECTIONS.PATIENTS).then((pts) => {
+      setAllPatients(pts);
+    });
+  }, []);
 
   // Handle autocomplete search
   useEffect(() => {
@@ -30,24 +44,16 @@ export default function PatientSearchCheckIn({ onCheckInSuccess }: PatientSearch
       return;
     }
 
-    const delayDebounce = setTimeout(async () => {
-      setIsSearching(true);
-      try {
-        const response = await fetch(`/api/patients?query=${encodeURIComponent(name)}`);
-        if (response.ok) {
-          const data = await response.json();
-          setSuggestions(data);
-          setShowDropdown(data.length > 0);
-        }
-      } catch (err) {
-        console.error("Autocomplete search error:", err);
-      } finally {
-        setIsSearching(false);
-      }
-    }, 250);
-
-    return () => clearTimeout(delayDebounce);
-  }, [name]);
+    const q = name.trim().toLowerCase();
+    const matched = allPatients.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.phone.includes(q) ||
+        p.id.toLowerCase().includes(q)
+    );
+    setSuggestions(matched);
+    setShowDropdown(matched.length > 0);
+  }, [name, allPatients]);
 
   // Click outside suggestions list close helper
   useEffect(() => {
@@ -60,7 +66,7 @@ export default function PatientSearchCheckIn({ onCheckInSuccess }: PatientSearch
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Handle selection of suggest patient
+  // Handle selection of suggested patient
   const handleSelectPatient = (patient: Patient) => {
     setName(patient.name);
     setPhone(patient.phone);
@@ -74,27 +80,20 @@ export default function PatientSearchCheckIn({ onCheckInSuccess }: PatientSearch
 
     setIsSubmitting(true);
     try {
-      const response = await fetch("/api/queue/checkin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: name.trim(),
-          phone: phone.trim(),
-          doctor,
-          patientId,
-        }),
+      // 1. Direct Firestore check-in
+      await checkInPatientDirect({
+        name: name.trim(),
+        phone: phone.trim(),
+        doctor,
+        patientId: patientId || undefined,
       });
 
-      if (response.ok) {
-        // Clear form
-        setName("");
-        setPhone("");
-        setDoctor("Dr. Ly MengKheang (គ្រូពេទ្យបង្គោល)");
-        setPatientId("");
-        onCheckInSuccess();
-      } else {
-        alert("ការចុះឈ្មោះមិនបានសម្រេច។ សូមព្យាយាមម្តងទៀត។");
-      }
+      // Clear form
+      setName("");
+      setPhone("");
+      setDoctor("Dr. Ly MengKheang (គ្រូពេទ្យបង្គោល)");
+      setPatientId("");
+      onCheckInSuccess();
     } catch (error) {
       console.error("Check-in request error:", error);
       alert("មានកំហុសក្នុងការចុះឈ្មោះ។");
@@ -138,43 +137,51 @@ export default function PatientSearchCheckIn({ onCheckInSuccess }: PatientSearch
                   if (patientId) setPatientId(""); // reset if they type
                 }}
                 required
-                placeholder="វាយឈ្មោះដើម្បីស្វែងរក..."
-                className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 outline-none transition text-sm text-slate-700 bg-slate-50/50"
-                autoComplete="off"
+                placeholder="ឧ. សុខ ចាន់រ៉ាវី..."
+                className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition"
               />
               {isSearching && (
-                <span className="absolute right-3.5 top-3 w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                <span className="absolute right-3 top-3 text-[10px] text-slate-400 animate-pulse">
+                  ស្វែងរក...
+                </span>
               )}
             </div>
 
-            {/* suggestions list dropdown */}
+            {/* Autocomplete Dropdown List */}
             {showDropdown && suggestions.length > 0 && (
-              <div id="patient-search-dropdown" className="absolute z-50 left-0 right-0 top-[102%] bg-white border border-slate-100 rounded-xl shadow-lg divide-y divide-slate-150 overflow-hidden max-h-52 overflow-y-auto">
-                <div className="bg-slate-50 px-3 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                  អ្នកជំងឺចាស់ដែលត្រូវគ្នា
+              <div className="absolute left-0 right-0 top-full mt-1 bg-white rounded-xl shadow-lg border border-slate-100 z-50 max-h-48 overflow-y-auto">
+                <div className="p-1.5 text-[10px] font-bold text-slate-400 border-b border-slate-100 bg-slate-50/50 uppercase tracking-wider">
+                  អ្នកជំងឺធ្លាប់មកពិនិត្យ ({suggestions.length})
                 </div>
                 {suggestions.map((p) => (
                   <button
                     key={p.id}
                     type="button"
                     onClick={() => handleSelectPatient(p)}
-                    className="w-full text-left px-4 py-2.5 hover:bg-blue-50/50 flex items-center justify-between text-xs text-slate-700 transition"
+                    className="w-full text-left px-3 py-2 text-xs hover:bg-blue-50/70 transition flex items-center justify-between border-b border-slate-50 last:border-0"
                   >
                     <div>
-                      <span className="font-semibold block text-slate-800">{p.name}</span>
-                      <span className="text-[10px] text-slate-400 font-mono">លេខកូដ: {p.id}</span>
+                      <span className="font-bold text-slate-700 block">{p.name}</span>
+                      <span className="text-[10px] text-slate-400 font-mono">{p.phone}</span>
                     </div>
-                    <div className="text-right">
-                      <span className="text-slate-500 block">{p.phone}</span>
-                      <span className="text-[10px] font-medium text-blue-500">{p.visitsCount || 0} ដង</span>
-                    </div>
+                    <span className="text-[10px] bg-blue-100/70 text-blue-700 font-mono px-1.5 py-0.5 rounded">
+                      {p.id}
+                    </span>
                   </button>
                 ))}
               </div>
             )}
           </div>
 
-          {/* Patient Phone Input */}
+          {/* Selected Patient ID indicator */}
+          {patientId && (
+            <div className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 text-xs px-3 py-1.5 rounded-lg border border-emerald-100">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>អ្នកជំងឺចាស់កូដ: <strong>{patientId}</strong></span>
+            </div>
+          )}
+
+          {/* Phone Number */}
           <div>
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
               លេខទូរស័ព្ទ
@@ -184,43 +191,46 @@ export default function PatientSearchCheckIn({ onCheckInSuccess }: PatientSearch
                 <Phone className="w-4 h-4" />
               </span>
               <input
-                type="text"
+                type="tel"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
                 required
-                placeholder="ឧ. +855 12 345 678"
-                className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 outline-none transition text-sm text-slate-700 bg-slate-50/50"
+                placeholder="ឧ. 012 345 678"
+                className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition"
               />
             </div>
           </div>
 
-          {/* Doctor Input */}
+          {/* Doctor Selection */}
           <div>
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
-              គ្រូពេទ្យទទួលបន្ទុក
+              ទន្តបណ្ឌិតទទួលបន្ទុក
             </label>
-            <input
-              type="text"
+            <select
               value={doctor}
               onChange={(e) => setDoctor(e.target.value)}
-              placeholder="វាយឈ្មោះគ្រូពេទ្យទទួលបន្ទុក..."
-              required
-              className="w-full p-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 outline-none transition text-sm text-slate-700 bg-slate-50/50"
-            />
+              className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition cursor-pointer font-medium text-slate-700"
+            >
+              <option value="Dr. Ly MengKheang (គ្រូពេទ្យបង្គោល)">
+                Dr. Ly MengKheang (គ្រូពេទ្យបង្គោល)
+              </option>
+              <option value="Dr. Chan Sophea (ទន្តបណ្ឌិតទូទៅ)">
+                Dr. Chan Sophea (ទន្តបណ្ឌិតទូទៅ)
+              </option>
+              <option value="Dr. Heng Bunrath (ឯកទេសតម្រង់ធ្មេញ)">
+                Dr. Heng Bunrath (ឯកទេសតម្រង់ធ្មេញ)
+              </option>
+            </select>
           </div>
 
-          {/* Submit Check-In button */}
+          {/* Submit Button */}
           <button
             type="submit"
             disabled={isSubmitting}
-            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold py-2.5 px-4 rounded-xl shadow-xs hover:shadow-md transition duration-200 text-xs flex items-center justify-center gap-2 cursor-pointer mt-2"
+            className="w-full bg-blue-600 hover:bg-blue-700 active:scale-[0.99] text-white font-bold py-2.5 px-4 rounded-xl shadow-xs shadow-blue-500/30 transition flex items-center justify-center gap-2 cursor-pointer text-sm disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isSubmitting ? (
-              <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-            ) : (
-              <PlusCircle className="w-4 h-4" />
-            )}
-            បញ្ចូលទៅក្នុងបញ្ជីរង់ចាំ
+            <PlusCircle className="w-4 h-4" />
+            {isSubmitting ? "កំពុងបញ្ចូល..." : "ចុះឈ្មោះ & បញ្ចូលជួរភ្លាមៗ"}
           </button>
         </form>
       </div>

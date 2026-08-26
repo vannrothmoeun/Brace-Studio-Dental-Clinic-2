@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from "react";
 import { Clock, Play, DollarSign, Ban, RefreshCw, UserCheck, Stethoscope } from "lucide-react";
 import { QueueItem } from "../types";
+import { saveToFirestore, COLLECTIONS } from "../services/firestoreService";
 
 interface ActiveQueueTableProps {
   queue: QueueItem[];
@@ -41,18 +42,15 @@ export default function ActiveQueueTable({ queue, onRefresh, onCheckout }: Activ
 
   const handleUpdateStatus = async (visitId: string, status: "In Treatment" | "Cancelled") => {
     try {
-      const response = await fetch(`/api/queue/${visitId}/status`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status }),
+      // 1. Direct Firestore update
+      await saveToFirestore(COLLECTIONS.QUEUE, {
+        visitId,
+        status,
       });
-      if (response.ok) {
-        onRefresh();
-      } else {
-        alert("មិនអាចធ្វើបច្ចុប្បន្នភាពស្ថានភាពជួរអ្នកជំងឺបានទេ។");
-      }
+      onRefresh();
     } catch (error) {
       console.error("Queue status update error:", error);
+      alert("មិនអាចធ្វើបច្ចុប្បន្នភាពស្ថានភាពជួរអ្នកជំងឺបានទេ។");
     }
   };
 
@@ -140,32 +138,36 @@ export default function ActiveQueueTable({ queue, onRefresh, onCheckout }: Activ
                         {isWaiting && (
                           <button
                             onClick={() => handleUpdateStatus(item.visitId, "In Treatment")}
-                            className="bg-blue-50 hover:bg-blue-600 text-blue-600 hover:text-white border border-blue-100 hover:border-blue-600 font-semibold px-3 py-1.5 rounded-xl text-xs transition duration-200 flex items-center gap-1 cursor-pointer"
+                            className="text-xs bg-blue-50 hover:bg-blue-600 text-blue-600 hover:text-white px-3 py-1.5 rounded-xl font-bold transition flex items-center gap-1 cursor-pointer border border-blue-100"
+                            title="ហៅអ្នកជំងឺចូលពិនិត្យ"
                           >
-                            <Play className="w-3.5 h-3.5" />
-                            ព្យាបាល
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                            <span>ហៅចូលពិនិត្យ</span>
                           </button>
                         )}
 
                         {isInTreatment && (
                           <button
                             onClick={() => onCheckout(item)}
-                            className="bg-emerald-50 hover:bg-emerald-600 text-emerald-600 hover:text-white border border-emerald-100 hover:border-emerald-600 font-semibold px-3 py-1.5 rounded-xl text-xs transition duration-200 flex items-center gap-1 cursor-pointer"
+                            className="text-xs bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white px-3 py-1.5 rounded-xl font-bold transition flex items-center gap-1 shadow-xs shadow-emerald-500/20 cursor-pointer"
+                            title="បញ្ចប់ការព្យាបាល & គិតប្រាក់"
                           >
                             <DollarSign className="w-3.5 h-3.5" />
-                            ទូទាត់ប្រាក់
+                            <span>គិតប្រាក់ / ចេញវិក្កយបត្រ</span>
                           </button>
                         )}
 
-                        {isWaiting && (
-                          <button
-                            onClick={() => handleUpdateStatus(item.visitId, "Cancelled")}
-                            title="លុបចោលការរង់ចាំ"
-                            className="bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-100 hover:border-rose-600 p-2 rounded-xl transition duration-200 cursor-pointer"
-                          >
-                            <Ban className="w-3.5 h-3.5" />
-                          </button>
-                        )}
+                        <button
+                          onClick={() => {
+                            if (window.confirm(`តើអ្នកពិតជាចង់លុបចោលជួររបស់អ្នកជំងឺ ${item.name} មែនទេ?`)) {
+                              handleUpdateStatus(item.visitId, "Cancelled");
+                            }
+                          }}
+                          className="p-1.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                          title="លុបចោលជួរ"
+                        >
+                          <Ban className="w-4 h-4" />
+                        </button>
                       </div>
                     </td>
                   </tr>

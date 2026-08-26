@@ -8,7 +8,7 @@ export interface Patient {
   name: string;
   phone: string;
   createdAt: string;
-  visitsCount: number;
+  visitsCount?: number;
 }
 
 export type QueueStatus = "Waiting" | "In Treatment" | "Completed" | "Cancelled";
@@ -114,6 +114,6 @@ export interface Appointment {
   doctor?: string;
   notes?: string;
   createdAt: string;
-  status: "Scheduled" | "Completed" | "Cancelled";
+  status: "Scheduled" | "Confirmed" | "Completed" | "Cancelled";
 }
 

@@ -17,6 +17,12 @@ import {
   RefreshCw
 } from "lucide-react";
 import { TreatmentLifecycle } from "../types";
+import {
+  getFirestoreCollection,
+  saveToFirestore,
+  deleteFromFirestore,
+  COLLECTIONS,
+} from "../services/firestoreService";
 
 export default function TreatmentLifecyclePanel() {
   const [treatments, setTreatments] = useState<TreatmentLifecycle[]>([]);
@@ -33,7 +39,7 @@ export default function TreatmentLifecyclePanel() {
   const [editPaidAmount, setEditPaidAmount] = useState<number>(0);
   const [editStatus, setEditStatus] = useState<string>("Active");
 
-  // State for adding a manual treatment (optional, highly helpful for receptionist)
+  // State for adding a manual treatment
   const [showAddModal, setShowAddModal] = useState(false);
   const [addPatientId, setAddPatientId] = useState("");
   const [addPatientName, setAddPatientName] = useState("");
@@ -46,11 +52,8 @@ export default function TreatmentLifecyclePanel() {
   const fetchTreatments = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch("/api/treatments");
-      if (res.ok) {
-        const data = await res.json();
-        setTreatments(data);
-      }
+      const data = await getFirestoreCollection<TreatmentLifecycle>(COLLECTIONS.TREATMENTS);
+      setTreatments(data);
     } catch (err) {
       console.error("Failed to load treatments:", err);
     } finally {
@@ -79,16 +82,23 @@ export default function TreatmentLifecyclePanel() {
 
     // 2. Days Filter (Incomplete/Active treatments whose last visit was over X days ago)
     if (daysFilter > 0) {
-      // Incomplete plans
       if (t.status !== "Active") return false;
       const days = getDaysSinceLastVisit(t.lastVisitDate);
       if (days < daysFilter) return false;
     }
 
+    // 3. Search query
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      const matchName = t.patientName.toLowerCase().includes(q);
+      const matchPhone = t.phone.includes(q);
+      const matchService = t.serviceName.toLowerCase().includes(q);
+      const matchId = t.id.toLowerCase().includes(q) || t.patientId.toLowerCase().includes(q);
+      return matchName || matchPhone || matchService || matchId;
+    }
+
     return true;
   });
-
-
 
   // Start editing a treatment
   const handleStartEdit = (t: TreatmentLifecycle) => {
@@ -106,528 +116,424 @@ export default function TreatmentLifecyclePanel() {
     if (!editingTreatment) return;
 
     try {
-      const response = await fetch(`/api/treatments/${editingTreatment.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          currentVisit: editCurrentVisit,
-          totalVisits: editTotalVisits,
-          totalCost: editTotalCost,
-          paidAmount: editPaidAmount,
-          status: editStatus,
-        }),
+      const remainingBalance = Math.max(0, editTotalCost - editPaidAmount);
+      const updatedStatus = remainingBalance <= 0 || editCurrentVisit >= editTotalVisits ? "Completed" : editStatus;
+
+      await saveToFirestore(COLLECTIONS.TREATMENTS, {
+        ...editingTreatment,
+        currentVisit: editCurrentVisit,
+        totalVisits: editTotalVisits,
+        totalCost: editTotalCost,
+        paidAmount: editPaidAmount,
+        remainingBalance,
+        status: updatedStatus,
+        lastVisitDate: new Date().toISOString(),
       });
 
-      if (response.ok) {
-        setEditingTreatment(null);
-        fetchTreatments();
-      } else {
-        alert("មិនអាចកែប្រែព័ត៌មានការព្យាបាលបានទេ។");
-      }
+      setEditingTreatment(null);
+      fetchTreatments();
     } catch (err) {
       console.error(err);
-      alert("កំហុសបណ្តាញ។");
+      alert("កំហុសក្នុងការកែប្រែ។");
     }
   };
 
   // Create manual treatment
   const handleCreateManual = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!addPatientId || !addPatientName || !addServiceName) {
+    if (!addPatientName || !addServiceName) {
       alert("សូមបំពេញព័ត៌មានចាំបាច់ឲ្យបានគ្រប់គ្រាន់!");
       return;
     }
 
     try {
-      const response = await fetch("/api/treatments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          patientId: addPatientId,
-          patientName: addPatientName,
-          phone: addPhone,
-          serviceName: addServiceName,
-          totalCost: addTotalCost,
-          totalVisits: addTotalVisits,
-          currentVisit: 1,
-          paidAmount: addPaidAmount,
-        }),
-      });
+      const id = `TL${Math.floor(100000 + Math.random() * 900000)}`;
+      const pId = addPatientId || `PT${Math.floor(100000 + Math.random() * 900000)}`;
+      const remainingBalance = Math.max(0, addTotalCost - addPaidAmount);
 
-      if (response.ok) {
-        setShowAddModal(false);
-        // Reset fields
-        setAddPatientId("");
-        setAddPatientName("");
-        setAddPhone("");
-        setAddServiceName("");
-        setAddTotalCost(100);
-        setAddPaidAmount(0);
-        setAddTotalVisits(3);
-        fetchTreatments();
-      } else {
-        alert("មិនអាចបង្កើតគម្រោងការព្យាបាលបានទេ។");
-      }
+      const newTreatment: TreatmentLifecycle = {
+        id,
+        patientId: pId,
+        patientName: addPatientName.trim(),
+        phone: addPhone.trim(),
+        serviceName: addServiceName.trim(),
+        totalCost: addTotalCost,
+        paidAmount: addPaidAmount,
+        remainingBalance,
+        totalVisits: addTotalVisits,
+        currentVisit: 1,
+        lastVisitDate: new Date().toISOString(),
+        status: "Active",
+      };
+
+      await saveToFirestore(COLLECTIONS.TREATMENTS, newTreatment);
+
+      setShowAddModal(false);
+      setAddPatientId("");
+      setAddPatientName("");
+      setAddPhone("");
+      setAddServiceName("");
+      setAddTotalCost(100);
+      setAddPaidAmount(0);
+      setAddTotalVisits(3);
+      fetchTreatments();
     } catch (err) {
       console.error(err);
-    }
-  };
-
-  // Delete treatment
-  const handleDeleteTreatment = async (id: string) => {
-    if (!window.confirm("តើលោកអ្នកពិតជាចង់លុបចោលគម្រោងការព្យាបាលនេះមែនទេ?")) return;
-
-    try {
-      const response = await fetch(`/api/treatments/${id}`, {
-        method: "DELETE",
-      });
-
-      if (response.ok) {
-        fetchTreatments();
-      } else {
-        alert("មិនអាចលុបគម្រោងនេះបានទេ។");
-      }
-    } catch (err) {
-      console.error(err);
+      alert("មិនអាចបង្កើតគម្រោងព្យាបាលថ្មីបានទេ។");
     }
   };
 
   return (
-    <div id="treatment-lifecycle-panel-root" className="space-y-6">
-      
-      {/* Panel Header & KPI bar */}
+    <div id="treatment-lifecycle-container" className="space-y-6">
+      {/* 1. Header Banner & Quick Controls */}
       <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
-            📋 ប្រព័ន្ធគ្រប់គ្រងវគ្គការព្យាបាល & តាមដានអ្នកជំងឺ
-          </h2>
-          <p className="text-xs text-slate-400">
-            តាមដានវគ្គសេវាកម្មព្យាបាលច្រើនលើក (Implants, Root Canals), ការបង់ប្រាក់បង្គ្រប់ និងសារតាមដានអ្នកជំងឺ
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-black text-slate-800 flex items-center gap-2">
+              📋 តាមដានវដ្តជីវិតនៃការព្យាបាល (Treatment Lifecycle)
+            </h2>
+            <span className="bg-blue-50 text-blue-700 text-[10px] font-extrabold px-2.5 py-0.5 rounded-full border border-blue-200">
+              Multi-Visit Tracking
+            </span>
+          </div>
+          <p className="text-xs text-slate-400 mt-1">
+            តាមដានវឌ្ឍនភាពនៃការមកព្យាបាលបន្ត និងសមតុល្យបង់ប្រាក់នៅសល់របស់អ្នកជំងឺ
           </p>
         </div>
+
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchTreatments}
-            className="p-2.5 bg-slate-50 text-slate-500 rounded-xl hover:bg-slate-100 transition cursor-pointer"
-            title="ទាញយកទិន្នន័យឡើងវិញ"
+            onClick={() => setShowAddModal(true)}
+            className="text-xs bg-blue-600 hover:bg-blue-700 text-white font-bold px-3.5 py-2 rounded-xl transition flex items-center gap-1.5 shadow-xs shadow-blue-500/20 cursor-pointer"
           >
-            <RefreshCw className={`w-4 h-4 ${isLoading ? "animate-spin" : ""}`} />
+            <Plus className="w-3.5 h-3.5" />
+            <span>+ បង្កើតគម្រោងថ្មី</span>
+          </button>
+          <button
+            onClick={fetchTreatments}
+            className="text-xs text-slate-600 hover:text-blue-600 bg-slate-50 hover:bg-slate-100 border border-slate-200 px-3 py-2 rounded-xl transition flex items-center gap-1.5 cursor-pointer font-medium"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? "animate-spin text-blue-600" : ""}`} />
+            <span>ផ្ទុកឡើងវិញ</span>
           </button>
         </div>
       </div>
 
-      {/* Filter bar */}
-      <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-xs grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
-        {/* Status filter */}
-        <div>
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="w-full p-2 bg-slate-50 border border-slate-150 rounded-xl text-xs text-slate-600 focus:outline-none"
-          >
-            <option value="Active">ស្ថានភាព៖ កំពុងព្យាបាល (Active)</option>
-            <option value="Completed">ស្ថានភាព៖ បានបញ្ចប់ (Completed)</option>
-            <option value="All">ស្ថានភាព៖ ទាំងអស់ (All Statuses)</option>
-          </select>
+      {/* 2. Filters and Search Bar */}
+      <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-xs flex flex-col md:flex-row items-center justify-between gap-3 text-xs">
+        <div className="relative w-full md:w-80">
+          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+          <input
+            type="text"
+            placeholder="ស្វែងរកតាមឈ្មោះ, លេខទូរស័ព្ទ, ឬកូដ..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none"
+          />
         </div>
 
-        {/* Days Filter (Pending Follow-ups) */}
-        <div>
+        <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+          {/* Status Tabs */}
+          <div className="flex bg-slate-100 p-1 rounded-xl">
+            {(["Active", "Completed", "All"] as const).map((st) => (
+              <button
+                key={st}
+                onClick={() => setStatusFilter(st)}
+                className={`px-3 py-1 font-bold rounded-lg transition cursor-pointer ${
+                  statusFilter === st
+                    ? "bg-white text-blue-700 shadow-xs"
+                    : "text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                {st === "Active" ? "កំពុងដំណើរការ" : st === "Completed" ? "បានបញ្ចប់" : "ទាំងអស់"}
+              </button>
+            ))}
+          </div>
+
+          {/* Days filter */}
           <select
             value={daysFilter}
             onChange={(e) => setDaysFilter(Number(e.target.value))}
-            className="w-full p-2 bg-slate-50 border border-slate-150 rounded-xl text-xs text-slate-600 focus:outline-none"
+            className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl font-medium text-slate-700 focus:outline-none"
           >
-            <option value="0">បញ្ជីតាមដាន៖ គម្រោងសកម្មទាំងអស់ (All Active Plans)</option>
-            <option value="3">មិនទាន់បានមកពិនិត្យលើសពី ៣ ថ្ងៃ (Over 3 days ago)</option>
-            <option value="7">មិនទាន់បានមកពិនិត្យលើសពី ៧ ថ្ងៃ (Over 7 days ago)</option>
-            <option value="14">មិនទាន់បានមកពិនិត្យលើសពី ១៤ ថ្ងៃ (Over 14 days ago)</option>
-            <option value="30">មិនទាន់បានមកពិនិត្យលើសពី ៣០ ថ្ងៃ (Over 30 days ago)</option>
+            <option value={0}>កាលបរិច្ឆេទទាំងអស់</option>
+            <option value={7}>ខកខានលើសពី ៧ ថ្ងៃ</option>
+            <option value={14}>ខកខានលើសពី ១៤ ថ្ងៃ</option>
+            <option value={30}>ខកខានលើសពី ៣០ ថ្ងៃ</option>
           </select>
         </div>
       </div>
 
-      {/* Grid of Treatment plans */}
-      {isLoading && treatments.length === 0 ? (
-        <div className="text-center py-12 text-xs text-slate-400 italic">
-          កំពុងទាញយកទិន្នន័យគម្រោងការព្យាបាល...
-        </div>
-      ) : filteredTreatments.length === 0 ? (
-        <div className="bg-white p-12 rounded-3xl border border-slate-100 shadow-xs text-center text-slate-400 text-xs">
-          <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-          គ្មានគម្រោងការព្យាបាលត្រូវគ្នានឹងតម្រងស្វែងរករបស់អ្នកឡើយ
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredTreatments.map((t) => {
-            const daysSinceVisit = getDaysSinceLastVisit(t.lastVisitDate);
-            const isOverdue = t.status === "Active" && daysSinceVisit >= 7;
+      {/* 3. Treatments List Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {filteredTreatments.length === 0 ? (
+          <div className="col-span-full text-center py-12 bg-white rounded-3xl border border-dashed border-slate-200 text-slate-400 text-xs">
+            ពុំមានទិន្នន័យគម្រោងព្យាបាលដែលត្រូវនឹងការស្វែងរកនេះឡើយ។
+          </div>
+        ) : (
+          filteredTreatments.map((t) => {
+            const daysSince = getDaysSinceLastVisit(t.lastVisitDate);
+            const isCompleted = t.status === "Completed";
+            const progressPct = Math.min(100, Math.round((t.currentVisit / t.totalVisits) * 100));
 
             return (
               <div
                 key={t.id}
-                className={`bg-white rounded-3xl border transition shadow-xs flex flex-col justify-between ${
-                  isOverdue ? "border-rose-200 bg-rose-50/5 hover:shadow-md" : "border-slate-100 hover:border-blue-200"
-                }`}
+                className="bg-white p-5 rounded-3xl border border-slate-100 shadow-xs hover:shadow-md transition flex flex-col justify-between"
               >
-                {/* Card Header */}
-                <div className="p-5 border-b border-slate-100">
-                  <div className="flex justify-between items-start gap-2 mb-2">
-                    <span className="font-mono text-[10px] font-black text-blue-600 px-2.5 py-1 bg-blue-50 rounded-lg">
-                      #{t.id}
-                    </span>
+                <div>
+                  <div className="flex justify-between items-start mb-3">
+                    <div>
+                      <span className="text-[10px] font-mono font-bold text-slate-400 block mb-0.5">
+                        {t.id} • {t.patientId}
+                      </span>
+                      <h4 className="font-bold text-slate-800 text-sm">{t.patientName}</h4>
+                      <p className="text-xs text-slate-400 font-mono">{t.phone}</p>
+                    </div>
                     <span
-                      className={`text-[10px] font-bold px-2.5 py-1 rounded-full ${
-                        t.status === "Completed"
-                          ? "bg-emerald-50 text-emerald-600 border border-emerald-150"
-                          : "bg-blue-50 text-blue-600 border border-blue-150"
+                      className={`text-[10px] font-bold px-2.5 py-1 rounded-full border ${
+                        isCompleted
+                          ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                          : "bg-blue-50 text-blue-700 border-blue-200"
                       }`}
                     >
-                      {t.status === "Completed" ? "បានបញ្ចប់សព្វគ្រប់" : "កំពុងព្យាបាល"}
+                      {isCompleted ? "បានបញ្ចប់" : "កំពុងដំណើរការ"}
                     </span>
                   </div>
 
-                  <h3 className="text-sm font-bold text-slate-850 flex items-center gap-1.5">
-                    <User className="w-4 h-4 text-slate-400" />
-                    {t.patientName}
-                  </h3>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
-                    លេខកូដអ្នកជំងឺ: <span className="font-mono font-bold">{t.patientId}</span> {t.phone && `| ${t.phone}`}
-                  </p>
-                </div>
-
-                {/* Card Body */}
-                <div className="p-5 space-y-3.5 flex-1">
-                  {/* Service Name */}
-                  <div>
-                    <span className="text-[10px] text-slate-400 font-semibold block uppercase">សេវាកម្មព្យាបាល</span>
-                    <span className="text-xs font-bold text-slate-800">{t.serviceName}</span>
-                  </div>
-
-                  {/* Visit Progression Bar */}
-                  <div>
-                    <div className="flex justify-between items-center text-[10px] text-slate-500 font-semibold mb-1">
-                      <span>ជំនួបការព្យាបាល</span>
-                      <span className="font-bold text-slate-700">
+                  <div className="bg-slate-50 p-3 rounded-2xl space-y-2 mb-4">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="font-bold text-slate-700">{t.serviceName}</span>
+                      <span className="font-mono font-bold text-blue-600">
                         លើកទី {t.currentVisit} / {t.totalVisits}
                       </span>
                     </div>
-                    <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+
+                    {/* Progress bar */}
+                    <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
                       <div
-                        className="bg-blue-600 h-full rounded-full transition-all duration-300"
-                        style={{ width: `${Math.min(100, (t.currentVisit / t.totalVisits) * 100)}%` }}
-                      ></div>
+                        className={`h-full transition-all duration-300 ${
+                          isCompleted ? "bg-emerald-500" : "bg-blue-600"
+                        }`}
+                        style={{ width: `${progressPct}%` }}
+                      />
+                    </div>
+
+                    <div className="flex justify-between text-[11px] text-slate-500 pt-1">
+                      <span>បានបង់: <strong className="text-emerald-600">${t.paidAmount || 0}</strong></span>
+                      <span>នៅសល់: <strong className="text-rose-600">${t.remainingBalance || 0}</strong></span>
                     </div>
                   </div>
 
-                  {/* Payment Reconciliation Info */}
-                  <div className="bg-slate-50 rounded-2xl p-3 grid grid-cols-3 gap-2 text-center border border-slate-100">
-                    <div>
-                      <span className="text-[9px] text-slate-400 block font-semibold">តម្លៃសរុប</span>
-                      <span className="text-xs font-bold font-mono text-slate-700">${t.totalCost.toFixed(2)}</span>
-                    </div>
-                    <div>
-                      <span className="text-[9px] text-slate-400 block font-semibold">បង់រួច</span>
-                      <span className="text-xs font-bold font-mono text-emerald-600">${t.paidAmount.toFixed(2)}</span>
-                    </div>
-                    <div>
-                      <span className="text-[9px] text-slate-400 block font-semibold">សមតុល្យ</span>
-                      <span className="text-xs font-bold font-mono text-blue-600">${t.remainingBalance.toFixed(2)}</span>
-                    </div>
-                  </div>
-
-                  {/* Last visit indicator */}
-                  <div className="flex items-center justify-between text-[11px] text-slate-500">
+                  <div className="text-[11px] text-slate-400 flex items-center justify-between pb-3 border-b border-slate-100">
                     <span className="flex items-center gap-1">
-                      <Calendar className="w-3.5 h-3.5 text-slate-400" />
-                      ពិនិត្យចុងក្រោយ៖
+                      <Calendar className="w-3 h-3" />
+                      មកចុងក្រោយ: {daysSince === 0 ? "ថ្ងៃនេះ" : `មុននេះ ${daysSince} ថ្ងៃ`}
                     </span>
-                    <span className={`font-semibold ${isOverdue ? "text-rose-600" : "text-slate-600"}`}>
-                      {new Date(t.lastVisitDate).toLocaleDateString("en-US")} ({daysSinceVisit} ថ្ងៃមុន)
+                    <span className="font-mono font-bold text-slate-700">
+                      សរុប ${t.totalCost}
                     </span>
                   </div>
                 </div>
 
-                {/* Card Actions Footer */}
-                <div className="p-4 bg-slate-50/50 border-t border-slate-100 rounded-b-3xl grid grid-cols-2 gap-2">
+                <div className="flex items-center justify-end gap-2 pt-3">
                   <button
                     onClick={() => handleStartEdit(t)}
-                    className="py-2 px-3 bg-white hover:bg-slate-50 border border-slate-200 text-slate-600 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer"
+                    className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-3 py-1.5 rounded-xl transition flex items-center gap-1 cursor-pointer"
                   >
-                    <Edit2 className="w-3.5 h-3.5 text-slate-400" />
-                    កែសម្រួលវគ្គ
+                    <Edit2 className="w-3 h-3" />
+                    កែសម្រួល
                   </button>
-
                   <button
-                    onClick={() => handleDeleteTreatment(t.id)}
-                    className="py-2 px-3 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer"
+                    onClick={async () => {
+                      if (window.confirm(`តើអ្នកពិតជាចង់លុបគម្រោង ${t.id} នេះមែនទេ?`)) {
+                        await deleteFromFirestore(COLLECTIONS.TREATMENTS, t.id);
+                        fetchTreatments();
+                      }
+                    }}
+                    className="p-1.5 text-slate-300 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
                   >
-                    <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-                    លុបចោលគម្រោង
+                    <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
               </div>
             );
-          })}
-        </div>
-      )}
+          })
+        )}
+      </div>
 
-      {/* --- EDIT TREATMENT LIFECYCLE MODAL --- */}
+      {/* Edit Modal */}
       {editingTreatment && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto">
-          <form onSubmit={handleSaveEdit} className="bg-white rounded-3xl shadow-xl border border-slate-100 max-w-md w-full overflow-hidden flex flex-col">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h3 className="text-xs sm:text-sm font-black text-slate-800">
-                កែសម្រួលគម្រោងការព្យាបាល (#{editingTreatment.id})
-              </h3>
-              <button
-                type="button"
-                onClick={() => setEditingTreatment(null)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="p-6 space-y-4">
-              <div>
-                <span className="block text-[10px] text-slate-400 font-bold uppercase mb-1">អ្នកជំងឺ</span>
-                <span className="font-bold text-slate-700 text-xs block">{editingTreatment.patientName}</span>
-                <span className="text-[10px] text-slate-400">កូដអ្នកជំងឺ: {editingTreatment.patientId}</span>
-              </div>
-
-              <div>
-                <span className="block text-[10px] text-slate-400 font-bold uppercase mb-1">សេវាកម្ម</span>
-                <span className="font-bold text-slate-700 text-xs block">{editingTreatment.serviceName}</span>
-              </div>
-
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border border-slate-100 space-y-4">
+            <h3 className="text-sm font-black text-slate-800 border-b border-slate-100 pb-3">
+              កែប្រែគម្រោង #{editingTreatment.id} - {editingTreatment.patientName}
+            </h3>
+            <form onSubmit={handleSaveEdit} className="space-y-3 text-xs">
               <div className="grid grid-cols-2 gap-3">
-                {/* Current Visit */}
                 <div>
-                  <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">ជំនួបលើកទី (Current Visit)</label>
+                  <label className="block font-bold text-slate-600 mb-1">លើកទីបច្ចុប្បន្ន</label>
                   <input
                     type="number"
                     min="1"
                     value={editCurrentVisit}
                     onChange={(e) => setEditCurrentVisit(Number(e.target.value))}
-                    className="w-full p-2 border border-slate-200 rounded-xl text-xs bg-white focus:outline-none"
-                    required
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
                   />
                 </div>
-
-                {/* Total Visits */}
                 <div>
-                  <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">ចំនួនដងសរុប (Total Visits)</label>
+                  <label className="block font-bold text-slate-600 mb-1">ចំនួនលើកសរុប</label>
                   <input
                     type="number"
                     min="1"
                     value={editTotalVisits}
                     onChange={(e) => setEditTotalVisits(Number(e.target.value))}
-                    className="w-full p-2 border border-slate-200 rounded-xl text-xs bg-white focus:outline-none"
-                    required
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                {/* Total Cost */}
                 <div>
-                  <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">តម្លៃកញ្ចប់សរុប ($)</label>
+                  <label className="block font-bold text-slate-600 mb-1">តម្លៃសរុប ($)</label>
                   <input
                     type="number"
-                    min="0"
                     step="0.01"
                     value={editTotalCost}
                     onChange={(e) => setEditTotalCost(Number(e.target.value))}
-                    className="w-full p-2 border border-slate-200 rounded-xl text-xs bg-white focus:outline-none"
-                    required
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold"
                   />
                 </div>
-
-                {/* Paid Amount */}
                 <div>
-                  <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">បង់រួចហើយ ($)</label>
+                  <label className="block font-bold text-slate-600 mb-1">បានបង់រួច ($)</label>
                   <input
                     type="number"
-                    min="0"
                     step="0.01"
                     value={editPaidAmount}
                     onChange={(e) => setEditPaidAmount(Number(e.target.value))}
-                    className="w-full p-2 border border-slate-200 rounded-xl text-xs bg-white focus:outline-none"
-                    required
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-emerald-600"
                   />
                 </div>
               </div>
 
-              {/* Status */}
               <div>
-                <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">ស្ថានភាព</label>
+                <label className="block font-bold text-slate-600 mb-1">ស្ថានភាព</label>
                 <select
                   value={editStatus}
                   onChange={(e) => setEditStatus(e.target.value)}
-                  className="w-full p-2 border border-slate-200 rounded-xl text-xs bg-white focus:outline-none text-slate-700"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-medium"
                 >
-                  <option value="Active">កំពុងព្យាបាល (Active)</option>
-                  <option value="Completed">បានបញ្ចប់សព្វគ្រប់ (Completed)</option>
+                  <option value="Active">Active (កំពុងដំណើរការ)</option>
+                  <option value="Completed">Completed (បានបញ្ចប់)</option>
                 </select>
               </div>
 
-              {/* Real-time remaining balance estimation */}
-              <div className="p-3 bg-blue-50/50 rounded-xl text-xs font-semibold text-blue-700 text-center flex justify-between items-center">
-                <span>សមតុល្យនៅសល់ (Remaining Balance)</span>
-                <span className="font-mono font-bold">${Math.max(0, editTotalCost - editPaidAmount).toFixed(2)}</span>
-              </div>
-
-              <div className="flex gap-3 pt-2">
+              <div className="flex justify-end gap-2 pt-3">
                 <button
                   type="button"
                   onClick={() => setEditingTreatment(null)}
-                  className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition cursor-pointer"
+                  className="px-4 py-2 bg-slate-100 text-slate-600 font-bold rounded-xl"
                 >
                   បោះបង់
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition cursor-pointer"
+                  className="px-4 py-2 bg-blue-600 text-white font-bold rounded-xl"
                 >
                   រក្សាទុក
                 </button>
               </div>
-            </div>
-          </form>
+            </form>
+          </div>
         </div>
       )}
 
-      {/* --- ADD MANUAL TREATMENT MODAL --- */}
+      {/* Create Manual Treatment Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto">
-          <form onSubmit={handleCreateManual} className="bg-white rounded-3xl shadow-xl border border-slate-100 max-w-md w-full overflow-hidden flex flex-col">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h3 className="text-xs sm:text-sm font-black text-slate-800">
-                បង្កើតគម្រោងការព្យាបាលថ្មី
-              </h3>
-              <button
-                type="button"
-                onClick={() => setShowAddModal(false)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="p-6 space-y-4 text-xs text-slate-600">
-              <div className="grid grid-cols-2 gap-3">
-                {/* Patient ID */}
-                <div>
-                  <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">កូដអ្នកជំងឺ *</label>
-                  <input
-                    type="text"
-                    value={addPatientId}
-                    placeholder="ឧ. KH1023"
-                    onChange={(e) => setAddPatientId(e.target.value)}
-                    className="w-full p-2 border border-slate-200 rounded-xl bg-white focus:outline-none"
-                    required
-                  />
-                </div>
-
-                {/* Patient Name */}
-                <div>
-                  <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">ឈ្មោះអ្នកជំងឺ *</label>
-                  <input
-                    type="text"
-                    value={addPatientName}
-                    placeholder="ឈ្មោះខ្មែរ ឬឡាតាំង"
-                    onChange={(e) => setAddPatientName(e.target.value)}
-                    className="w-full p-2 border border-slate-200 rounded-xl bg-white focus:outline-none"
-                    required
-                  />
-                </div>
-              </div>
-
-              {/* Phone number */}
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border border-slate-100 space-y-4">
+            <h3 className="text-sm font-black text-slate-800 border-b border-slate-100 pb-3">
+              + បង្កើតគម្រោងព្យាបាលថ្មី (New Treatment Plan)
+            </h3>
+            <form onSubmit={handleCreateManual} className="space-y-3 text-xs">
               <div>
-                <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">លេខទូរស័ព្ទ</label>
+                <label className="block font-bold text-slate-600 mb-1">ឈ្មោះអ្នកជំងឺ</label>
                 <input
                   type="text"
-                  value={addPhone}
-                  placeholder="ឧ. 012345678"
-                  onChange={(e) => setAddPhone(e.target.value)}
-                  className="w-full p-2 border border-slate-200 rounded-xl bg-white focus:outline-none"
-                />
-              </div>
-
-              {/* Service Name */}
-              <div>
-                <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">សេវាកម្មការព្យាបាល *</label>
-                <input
-                  type="text"
-                  value={addServiceName}
-                  placeholder="ឧ. Implant, Root Canal, ដាក់ធ្មេញពាក់កណ្តាល"
-                  onChange={(e) => setAddServiceName(e.target.value)}
-                  className="w-full p-2 border border-slate-200 rounded-xl bg-white focus:outline-none"
                   required
+                  placeholder="ឧ. សុខ ចាន់រ៉ាវី"
+                  value={addPatientName}
+                  onChange={(e) => setAddPatientName(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
                 />
               </div>
 
-              <div className="grid grid-cols-3 gap-2">
-                {/* Total Cost */}
+              <div>
+                <label className="block font-bold text-slate-600 mb-1">លេខទូរស័ព្ទ</label>
+                <input
+                  type="tel"
+                  placeholder="012 345 678"
+                  value={addPhone}
+                  onChange={(e) => setAddPhone(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-600 mb-1">ឈ្មោះសេវាកម្មព្យាបាល</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="ឧ. Root Canal Treatment"
+                  value={addServiceName}
+                  onChange={(e) => setAddServiceName(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">តម្លៃសរុប ($) *</label>
+                  <label className="block font-bold text-slate-600 mb-1">តម្លៃសរុប ($)</label>
                   <input
                     type="number"
+                    step="0.01"
                     min="0"
                     value={addTotalCost}
                     onChange={(e) => setAddTotalCost(Number(e.target.value))}
-                    className="w-full p-2 border border-slate-200 rounded-xl bg-white focus:outline-none text-center"
-                    required
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold"
                   />
                 </div>
-
-                {/* Paid amount */}
                 <div>
-                  <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">បង់បានខ្លះ ($)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={addPaidAmount}
-                    onChange={(e) => setAddPaidAmount(Number(e.target.value))}
-                    className="w-full p-2 border border-slate-200 rounded-xl bg-white focus:outline-none text-center"
-                    required
-                  />
-                </div>
-
-                {/* Total visits */}
-                <div>
-                  <label className="block text-[10px] text-slate-400 font-bold uppercase mb-1">ចំនួនលើកសរុប *</label>
+                  <label className="block font-bold text-slate-600 mb-1">ចំនួនលើកសរុប</label>
                   <input
                     type="number"
                     min="1"
                     value={addTotalVisits}
                     onChange={(e) => setAddTotalVisits(Number(e.target.value))}
-                    className="w-full p-2 border border-slate-200 rounded-xl bg-white focus:outline-none text-center"
-                    required
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
                   />
                 </div>
               </div>
 
-              <div className="flex gap-3 pt-2">
+              <div className="flex justify-end gap-2 pt-3">
                 <button
                   type="button"
                   onClick={() => setShowAddModal(false)}
-                  className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition cursor-pointer"
+                  className="px-4 py-2 bg-slate-100 text-slate-600 font-bold rounded-xl"
                 >
                   បោះបង់
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition cursor-pointer"
+                  className="px-4 py-2 bg-blue-600 text-white font-bold rounded-xl"
                 >
                   បង្កើតគម្រោង
                 </button>
               </div>
-            </div>
-          </form>
+            </form>
+          </div>
         </div>
       )}
-
     </div>
   );
 }
