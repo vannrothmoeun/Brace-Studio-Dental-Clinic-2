@@ -17,20 +17,5 @@ export const firebaseConfig = {
 export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
 // Initialize Firestore with Database ID from config or default
-const databaseId = config.firestoreDatabaseId && config.firestoreDatabaseId !== ""
-  ? config.firestoreDatabaseId
-  : "(default)";
-
-export const db = getFirestore(app, databaseId);
-
-// Initialize Analytics conditionally
-export let analytics: any = null;
-if (typeof window !== "undefined") {
-  isSupported().then((supported) => {
-    if (supported) {
-      analytics = getAnalytics(app);
-    }
-  }).catch(() => {
-    // Ignore analytics errors in preview
-  });
-}
+// Initialize Firestore directly with the AI Studio Database ID
+export const db = getFirestore(app, "ai-studio-16681b43-f991-4fe4-ab00-e423a7c60c65");
