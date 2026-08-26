@@ -1,0 +1,81 @@
+{
+  "entities": {
+    "patients": {
+      "fields": {
+        "id": { "type": "string", "description": "Patient ID (e.g. PT1001)" },
+        "name": { "type": "string", "description": "Patient full name" },
+        "phone": { "type": "string", "description": "Patient phone number" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "visitsCount": { "type": "number", "description": "Number of visits" }
+      }
+    },
+    "queue": {
+      "fields": {
+        "visitId": { "type": "string", "description": "Visit ID" },
+        "patientId": { "type": "string", "description": "Patient ID" },
+        "name": { "type": "string", "description": "Patient name" },
+        "phone": { "type": "string", "description": "Phone number" },
+        "timestamp": { "type": "string", "description": "Date ISO string" },
+        "checkInTime": { "type": "string", "description": "Time string" },
+        "status": { "type": "string", "description": "Queue status (Waiting, In Treatment, Completed, Cancelled)" },
+        "doctor": { "type": "string", "description": "Attending doctor" },
+        "treatmentItems": { "type": "array", "description": "Items treated" },
+        "invoiceNo": { "type": "string", "description": "Invoice number if billed" },
+        "notes": { "type": "string", "description": "Clinical notes" }
+      }
+    },
+    "appointments": {
+      "fields": {
+        "id": { "type": "string", "description": "Appointment ID" },
+        "patientName": { "type": "string", "description": "Patient name" },
+        "phone": { "type": "string", "description": "Phone number" },
+        "service": { "type": "string", "description": "Service booked" },
+        "date": { "type": "string", "description": "Appointment date" },
+        "time": { "type": "string", "description": "Appointment time" },
+        "doctor": { "type": "string", "description": "Doctor name" },
+        "notes": { "type": "string", "description": "Notes" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "status": { "type": "string", "description": "Status (Scheduled, Completed, Cancelled)" }
+      }
+    },
+    "treatments": {
+      "fields": {
+        "id": { "type": "string", "description": "Treatment lifecycle ID" },
+        "patientId": { "type": "string", "description": "Patient ID" },
+        "patientName": { "type": "string", "description": "Patient name" },
+        "phone": { "type": "string", "description": "Phone number" },
+        "serviceName": { "type": "string", "description": "Service name" },
+        "totalCost": { "type": "number", "description": "Total cost of plan" },
+        "paidAmount": { "type": "number", "description": "Amount paid so far" },
+        "remainingBalance": { "type": "number", "description": "Remaining balance" },
+        "totalVisits": { "type": "number", "description": "Planned visits" },
+        "currentVisit": { "type": "number", "description": "Current visit number" },
+        "lastVisitDate": { "type": "string", "description": "Last visit date" },
+        "status": { "type": "string", "description": "Status (Active, Completed, Incomplete)" }
+      }
+    },
+    "prices": {
+      "fields": {
+        "id": { "type": "string", "description": "Service Price ID" },
+        "name": { "type": "string", "description": "Service name" },
+        "price": { "type": "number", "description": "Base price" },
+        "minPrice": { "type": "number", "description": "Minimum price" },
+        "maxPrice": { "type": "number", "description": "Maximum price" },
+        "category": { "type": "string", "description": "Service category" },
+        "archived": { "type": "boolean", "description": "Archived flag" }
+      }
+    },
+    "sales": {
+      "fields": {
+        "txnId": { "type": "string", "description": "Transaction ID" },
+        "patientId": { "type": "string", "description": "Patient ID" },
+        "patientName": { "type": "string", "description": "Patient Name" },
+        "visitId": { "type": "string", "description": "Visit ID" },
+        "amount": { "type": "number", "description": "Amount paid" },
+        "type": { "type": "string", "description": "Payment or Deposit" },
+        "paymentMethod": { "type": "string", "description": "Payment method" },
+        "date": { "type": "string", "description": "Date ISO string" }
+      }
+    }
+  }
+}

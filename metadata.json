@@ -1,0 +1,6 @@
+{
+  "name": "Brace Studio Dental Clinic",
+  "description": "Brace Studio Dental Clinic - ប្រព័ន្ធគ្រប់គ្រងគ្លីនិកធ្មេញ រួមមានការចុះឈ្មោះអ្នកជំងឺ ការកក់ការណាត់ជួប ការតាមដានជួររង់ចាំ កាតាឡុកតម្លៃ វដ្តជីវិតនៃការព្យាបាល និងការចេញវិក្កយបត្របង់ប្រាក់។",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
